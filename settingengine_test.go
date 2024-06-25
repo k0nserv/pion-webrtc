@@ -1,14 +1,21 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
 package webrtc
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/pion/transport/test"
+	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
+	"github.com/pion/ice/v3"
+	"github.com/pion/stun/v2"
+	"github.com/pion/transport/v3/test"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -234,6 +241,28 @@ func TestSetDTLSRetransmissionInterval(t *testing.T) {
 	}
 }
 
+func TestSetDTLSEllipticCurves(t *testing.T) {
+	s := SettingEngine{}
+
+	if len(s.dtls.ellipticCurves) != 0 {
+		t.Fatalf("SettingEngine defaults aren't as expected.")
+	}
+
+	s.SetDTLSEllipticCurves(elliptic.P256)
+	if len(s.dtls.ellipticCurves) == 0 ||
+		s.dtls.ellipticCurves[0] != elliptic.P256 {
+		t.Errorf("Failed to set DTLS elliptic curves")
+	}
+}
+
+func TestSetDTLSHandShakeTimeout(*testing.T) {
+	s := SettingEngine{}
+
+	s.SetDTLSConnectContextMaker(func() (context.Context, func()) {
+		return context.WithTimeout(context.Background(), 60*time.Second)
+	})
+}
+
 func TestSetSCTPMaxReceiverBufferSize(t *testing.T) {
 	s := SettingEngine{}
 	assert.Equal(t, uint32(0), s.sctp.maxReceiveBufferSize)
@@ -241,4 +270,42 @@ func TestSetSCTPMaxReceiverBufferSize(t *testing.T) {
 	expSize := uint32(4 * 1024 * 1024)
 	s.SetSCTPMaxReceiveBufferSize(expSize)
 	assert.Equal(t, expSize, s.sctp.maxReceiveBufferSize)
+}
+
+func TestSetSCTPRTOMax(t *testing.T) {
+	s := SettingEngine{}
+	assert.Equal(t, time.Duration(0), s.sctp.rtoMax)
+
+	expSize := time.Second
+	s.SetSCTPRTOMax(expSize)
+	assert.Equal(t, expSize, s.sctp.rtoMax)
+}
+
+func TestSetICEBindingRequestHandler(t *testing.T) {
+	seenICEControlled, seenICEControlledCancel := context.WithCancel(context.Background())
+	seenICEControlling, seenICEControllingCancel := context.WithCancel(context.Background())
+
+	s := SettingEngine{}
+	s.SetICEBindingRequestHandler(func(m *stun.Message, _, _ ice.Candidate, _ *ice.CandidatePair) bool {
+		for _, a := range m.Attributes {
+			switch a.Type {
+			case stun.AttrICEControlled:
+				seenICEControlledCancel()
+			case stun.AttrICEControlling:
+				seenICEControllingCancel()
+			default:
+			}
+		}
+
+		return false
+	})
+
+	pcOffer, pcAnswer, err := NewAPI(WithSettingEngine(s)).newPair(Configuration{})
+	assert.NoError(t, err)
+
+	assert.NoError(t, signalPair(pcOffer, pcAnswer))
+
+	<-seenICEControlled.Done()
+	<-seenICEControlling.Done()
+	closePairNow(t, pcOffer, pcAnswer)
 }

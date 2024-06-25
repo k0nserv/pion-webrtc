@@ -1,18 +1,26 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
+// pion-to-pion is an example of two pion instances communicating directly!
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/examples/internal/signal"
+	"github.com/pion/randutil"
+	"github.com/pion/webrtc/v4"
 )
 
 func signalCandidate(addr string, c *webrtc.ICECandidate) error {
@@ -23,11 +31,7 @@ func signalCandidate(addr string, c *webrtc.ICECandidate) error {
 		return err
 	}
 
-	if closeErr := resp.Body.Close(); closeErr != nil {
-		return closeErr
-	}
-
-	return nil
+	return resp.Body.Close()
 }
 
 func main() { // nolint:gocognit
@@ -80,8 +84,8 @@ func main() { // nolint:gocognit
 	// A HTTP handler that allows the other Pion instance to send us ICE candidates
 	// This allows us to add ICE candidates faster, we don't have to wait for STUN or TURN
 	// candidates which may be slower
-	http.HandleFunc("/candidate", func(w http.ResponseWriter, r *http.Request) {
-		candidate, candidateErr := ioutil.ReadAll(r.Body)
+	http.HandleFunc("/candidate", func(w http.ResponseWriter, r *http.Request) { //nolint: revive
+		candidate, candidateErr := io.ReadAll(r.Body)
 		if candidateErr != nil {
 			panic(candidateErr)
 		}
@@ -91,7 +95,7 @@ func main() { // nolint:gocognit
 	})
 
 	// A HTTP handler that processes a SessionDescription given to us from the other Pion process
-	http.HandleFunc("/sdp", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/sdp", func(w http.ResponseWriter, r *http.Request) { // nolint: revive
 		sdp := webrtc.SessionDescription{}
 		if err := json.NewDecoder(r.Body).Decode(&sdp); err != nil {
 			panic(err)
@@ -147,6 +151,12 @@ func main() { // nolint:gocognit
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
 		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
+			os.Exit(0)
+		}
 	})
 
 	// Register data channel creation handling
@@ -158,12 +168,14 @@ func main() { // nolint:gocognit
 			fmt.Printf("Data channel '%s'-'%d' open. Random messages will now be sent to any connected DataChannels every 5 seconds\n", d.Label(), d.ID())
 
 			for range time.NewTicker(5 * time.Second).C {
-				message := signal.RandSeq(15)
-				fmt.Printf("Sending '%s'\n", message)
+				message, sendTextErr := randutil.GenerateCryptoRandomString(15, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+				if sendTextErr != nil {
+					panic(sendTextErr)
+				}
 
 				// Send the message as text
-				sendTextErr := d.SendText(message)
-				if sendTextErr != nil {
+				fmt.Printf("Sending '%s'\n", message)
+				if sendTextErr = d.SendText(message); sendTextErr != nil {
 					panic(sendTextErr)
 				}
 			}
@@ -176,5 +188,48 @@ func main() { // nolint:gocognit
 	})
 
 	// Start HTTP server that accepts requests from the offer process to exchange SDP and Candidates
+	// nolint: gosec
 	panic(http.ListenAndServe(*answerAddr, nil))
+}
+
+// Read from stdin until we get a newline
+func readUntilNewline() (in string) {
+	var err error
+
+	r := bufio.NewReader(os.Stdin)
+	for {
+		in, err = r.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			panic(err)
+		}
+
+		if in = strings.TrimSpace(in); len(in) > 0 {
+			break
+		}
+	}
+
+	fmt.Println("")
+	return
+}
+
+// JSON encode + base64 a SessionDescription
+func encode(obj *webrtc.SessionDescription) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
+	}
+
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// Decode a base64 and unmarshal JSON into a SessionDescription
+func decode(in string, obj *webrtc.SessionDescription) {
+	b, err := base64.StdEncoding.DecodeString(in)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = json.Unmarshal(b, obj); err != nil {
+		panic(err)
+	}
 }

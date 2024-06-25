@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -8,8 +11,8 @@ import (
 	"sync"
 
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v3/internal/util"
-	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/webrtc/v4/internal/util"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 // trackBinding is a single bind for a Track
@@ -128,18 +131,27 @@ var rtpPacketPool = sync.Pool{
 	},
 }
 
+func resetPacketPoolAllocation(localPacket *rtp.Packet) {
+	*localPacket = rtp.Packet{}
+	rtpPacketPool.Put(localPacket)
+}
+
+func getPacketAllocationFromPool() *rtp.Packet {
+	ipacket := rtpPacketPool.Get()
+	return ipacket.(*rtp.Packet) //nolint:forcetypeassert
+}
+
 // WriteRTP writes a RTP Packet to the TrackLocalStaticRTP
 // If one PeerConnection fails the packets will still be sent to
 // all PeerConnections. The error message will contain the ID of the failed
 // PeerConnections so you can remove them
 func (s *TrackLocalStaticRTP) WriteRTP(p *rtp.Packet) error {
-	ipacket := rtpPacketPool.Get()
-	packet := ipacket.(*rtp.Packet) //nolint:forcetypeassert
-	defer func() {
-		*packet = rtp.Packet{}
-		rtpPacketPool.Put(ipacket)
-	}()
+	packet := getPacketAllocationFromPool()
+
+	defer resetPacketPoolAllocation(packet)
+
 	*packet = *p
+
 	return s.writeRTP(packet)
 }
 
@@ -166,12 +178,9 @@ func (s *TrackLocalStaticRTP) writeRTP(p *rtp.Packet) error {
 // all PeerConnections. The error message will contain the ID of the failed
 // PeerConnections so you can remove them
 func (s *TrackLocalStaticRTP) Write(b []byte) (n int, err error) {
-	ipacket := rtpPacketPool.Get()
-	packet := ipacket.(*rtp.Packet) //nolint:forcetypeassert
-	defer func() {
-		*packet = rtp.Packet{}
-		rtpPacketPool.Put(ipacket)
-	}()
+	packet := getPacketAllocationFromPool()
+
+	defer resetPacketPoolAllocation(packet)
 
 	if err = packet.Unmarshal(b); err != nil {
 		return 0, err
@@ -285,6 +294,31 @@ func (s *TrackLocalStaticSample) WriteSample(sample media.Sample) error {
 		p.SkipSamples(samples * uint32(sample.PrevDroppedPackets))
 	}
 	packets := p.Packetize(sample.Data, samples)
+
+	writeErrs := []error{}
+	for _, p := range packets {
+		if err := s.rtpTrack.WriteRTP(p); err != nil {
+			writeErrs = append(writeErrs, err)
+		}
+	}
+
+	return util.FlattenErrs(writeErrs)
+}
+
+// GeneratePadding writes padding-only samples to the TrackLocalStaticSample
+// If one PeerConnection fails the packets will still be sent to
+// all PeerConnections. The error message will contain the ID of the failed
+// PeerConnections so you can remove them
+func (s *TrackLocalStaticSample) GeneratePadding(samples uint32) error {
+	s.rtpTrack.mu.RLock()
+	p := s.packetizer
+	s.rtpTrack.mu.RUnlock()
+
+	if p == nil {
+		return nil
+	}
+
+	packets := p.GeneratePadding(samples)
 
 	writeErrs := []error{}
 	for _, p := range packets {

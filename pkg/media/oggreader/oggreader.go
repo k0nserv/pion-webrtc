@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // Package oggreader implements the Ogg media container reader
 package oggreader
 
@@ -185,6 +188,8 @@ func (o *OggReader) ParseNextPage() ([]byte, *OggPageHeader, error) {
 			return nil, nil, errChecksumMismatch
 		}
 	}
+
+	o.bytesReadSuccesfully += int64(len(h) + len(sizeBuffer) + len(payload))
 
 	return payload, pageHeader, nil
 }

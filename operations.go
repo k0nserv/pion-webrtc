@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 package webrtc
 
 import (
@@ -13,11 +16,19 @@ type operations struct {
 	mu   sync.Mutex
 	busy bool
 	ops  *list.List
+
+	updateNegotiationNeededFlagOnEmptyChain *atomicBool
+	onNegotiationNeeded                     func()
 }
 
-func newOperations() *operations {
+func newOperations(
+	updateNegotiationNeededFlagOnEmptyChain *atomicBool,
+	onNegotiationNeeded func(),
+) *operations {
 	return &operations{
-		ops: list.New(),
+		ops:                                     list.New(),
+		updateNegotiationNeededFlagOnEmptyChain: updateNegotiationNeededFlagOnEmptyChain,
+		onNegotiationNeeded:                     onNegotiationNeeded,
 	}
 }
 
@@ -90,4 +101,9 @@ func (o *operations) start() {
 		fn()
 		fn = o.pop()
 	}
+	if !o.updateNegotiationNeededFlagOnEmptyChain.get() {
+		return
+	}
+	o.updateNegotiationNeededFlagOnEmptyChain.set(false)
+	o.onNegotiationNeeded()
 }

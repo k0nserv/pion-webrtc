@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -21,10 +24,10 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
-	"github.com/pion/srtp/v2"
-	"github.com/pion/webrtc/v3/internal/mux"
-	"github.com/pion/webrtc/v3/internal/util"
-	"github.com/pion/webrtc/v3/pkg/rtcerr"
+	"github.com/pion/srtp/v3"
+	"github.com/pion/webrtc/v4/internal/mux"
+	"github.com/pion/webrtc/v4/internal/util"
+	"github.com/pion/webrtc/v4/pkg/rtcerr"
 )
 
 // DTLSTransport allows an application access to information about the DTLS
@@ -41,7 +44,8 @@ type DTLSTransport struct {
 	state                 DTLSTransportState
 	srtpProtectionProfile srtp.ProtectionProfile
 
-	onStateChangeHandler func(DTLSTransportState)
+	onStateChangeHandler   func(DTLSTransportState)
+	internalOnCloseHandler func()
 
 	conn *dtls.Conn
 
@@ -139,13 +143,11 @@ func (t *DTLSTransport) WriteRTCP(pkts []rtcp.Packet) (int, error) {
 
 	writeStream, err := srtcpSession.OpenWriteStream()
 	if err != nil {
+		// nolint
 		return 0, fmt.Errorf("%w: %v", errPeerConnWriteRTCPOpenWriteStream, err)
 	}
 
-	if n, err := writeStream.Write(raw); err != nil {
-		return n, err
-	}
-	return 0, nil
+	return writeStream.Write(raw)
 }
 
 // GetLocalParameters returns the DTLS parameters of the local DTLSTransport upon construction.
@@ -212,16 +214,19 @@ func (t *DTLSTransport) startSRTP() error {
 	connState := t.conn.ConnectionState()
 	err := srtpConfig.ExtractSessionKeysFromDTLS(&connState, t.role() == DTLSRoleClient)
 	if err != nil {
+		// nolint
 		return fmt.Errorf("%w: %v", errDtlsKeyExtractionFailed, err)
 	}
 
 	srtpSession, err := srtp.NewSessionSRTP(t.srtpEndpoint, srtpConfig)
 	if err != nil {
+		// nolint
 		return fmt.Errorf("%w: %v", errFailedToStartSRTP, err)
 	}
 
 	srtcpSession, err := srtp.NewSessionSRTCP(t.srtcpEndpoint, srtpConfig)
 	if err != nil {
+		// nolint
 		return fmt.Errorf("%w: %v", errFailedToStartSRTCP, err)
 	}
 
@@ -312,12 +317,14 @@ func (t *DTLSTransport) Start(remoteParameters DTLSParameters) error {
 			}(),
 			ClientAuth:         dtls.RequireAnyClientCert,
 			LoggerFactory:      t.api.settingEngine.LoggerFactory,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: !t.api.settingEngine.dtls.disableInsecureSkipVerify,
+			CustomCipherSuites: t.api.settingEngine.dtls.customCipherSuites,
 		}, nil
 	}
 
 	var dtlsConn *dtls.Conn
 	dtlsEndpoint := t.iceTransport.newEndpoint(mux.MatchDTLS)
+	dtlsEndpoint.SetOnClose(t.internalOnCloseHandler)
 	role, dtlsConfig, err := prepareTransport()
 	if err != nil {
 		return err
@@ -327,9 +334,18 @@ func (t *DTLSTransport) Start(remoteParameters DTLSParameters) error {
 		dtlsConfig.ReplayProtectionWindow = int(*t.api.settingEngine.replayProtection.DTLS)
 	}
 
-	if t.api.settingEngine.dtls.retransmissionInterval != 0 {
-		dtlsConfig.FlightInterval = t.api.settingEngine.dtls.retransmissionInterval
+	if t.api.settingEngine.dtls.clientAuth != nil {
+		dtlsConfig.ClientAuth = *t.api.settingEngine.dtls.clientAuth
 	}
+
+	dtlsConfig.FlightInterval = t.api.settingEngine.dtls.retransmissionInterval
+	dtlsConfig.InsecureSkipVerifyHello = t.api.settingEngine.dtls.insecureSkipHelloVerify
+	dtlsConfig.EllipticCurves = t.api.settingEngine.dtls.ellipticCurves
+	dtlsConfig.ConnectContextMaker = t.api.settingEngine.dtls.connectContextMaker
+	dtlsConfig.ExtendedMasterSecret = t.api.settingEngine.dtls.extendedMasterSecret
+	dtlsConfig.ClientCAs = t.api.settingEngine.dtls.clientCAs
+	dtlsConfig.RootCAs = t.api.settingEngine.dtls.rootCAs
+	dtlsConfig.KeyLogWriter = t.api.settingEngine.dtls.keyLogWriter
 
 	// Connect as DTLS Client/Server, function is blocking and we
 	// must not hold the DTLSTransport lock
@@ -357,6 +373,8 @@ func (t *DTLSTransport) Start(remoteParameters DTLSParameters) error {
 	switch srtpProfile {
 	case dtls.SRTP_AEAD_AES_128_GCM:
 		t.srtpProtectionProfile = srtp.ProtectionProfileAeadAes128Gcm
+	case dtls.SRTP_AEAD_AES_256_GCM:
+		t.srtpProtectionProfile = srtp.ProtectionProfileAeadAes256Gcm
 	case dtls.SRTP_AES128_CM_HMAC_SHA1_80:
 		t.srtpProtectionProfile = srtp.ProtectionProfileAes128CmHmacSha1_80
 	default:
@@ -490,7 +508,7 @@ func (t *DTLSTransport) streamsForSSRC(ssrc SSRC, streamInfo interceptor.StreamI
 		return nil, nil, nil, nil, err
 	}
 
-	rtcpInterceptor := t.api.interceptor.BindRTCPReader(interceptor.RTPReaderFunc(func(in []byte, a interceptor.Attributes) (n int, attributes interceptor.Attributes, err error) {
+	rtcpInterceptor := t.api.interceptor.BindRTCPReader(interceptor.RTCPReaderFunc(func(in []byte, a interceptor.Attributes) (n int, attributes interceptor.Attributes, err error) {
 		n, err = rtcpReadStream.Read(in)
 		return n, a, err
 	}))

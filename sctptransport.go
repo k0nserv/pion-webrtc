@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -13,7 +16,7 @@ import (
 	"github.com/pion/datachannel"
 	"github.com/pion/logging"
 	"github.com/pion/sctp"
-	"github.com/pion/webrtc/v3/pkg/rtcerr"
+	"github.com/pion/webrtc/v4/pkg/rtcerr"
 )
 
 const sctpMaxChannels = uint16(65535)
@@ -49,6 +52,7 @@ type SCTPTransport struct {
 
 	// DataChannels
 	dataChannels          []*DataChannel
+	dataChannelIDsUsed    map[uint16]struct{}
 	dataChannelsOpened    uint32
 	dataChannelsRequested uint32
 	dataChannelsAccepted  uint32
@@ -62,10 +66,11 @@ type SCTPTransport struct {
 // meant to be used together with the basic WebRTC API.
 func (api *API) NewSCTPTransport(dtls *DTLSTransport) *SCTPTransport {
 	res := &SCTPTransport{
-		dtlsTransport: dtls,
-		state:         SCTPTransportStateConnecting,
-		api:           api,
-		log:           api.settingEngine.LoggerFactory.NewLogger("ortc"),
+		dtlsTransport:      dtls,
+		state:              SCTPTransportStateConnecting,
+		api:                api,
+		log:                api.settingEngine.LoggerFactory.NewLogger("ortc"),
+		dataChannelIDsUsed: make(map[uint16]struct{}),
 	}
 
 	res.updateMessageSize()
@@ -92,7 +97,7 @@ func (r *SCTPTransport) GetCapabilities() SCTPCapabilities {
 // Start the SCTPTransport. Since both local and remote parties must mutually
 // create an SCTPTransport, SCTP SO (Simultaneous Open) is used to establish
 // a connection over SCTP.
-func (r *SCTPTransport) Start(remoteCaps SCTPCapabilities) error {
+func (r *SCTPTransport) Start(SCTPCapabilities) error {
 	if r.isStarted {
 		return nil
 	}
@@ -102,11 +107,12 @@ func (r *SCTPTransport) Start(remoteCaps SCTPCapabilities) error {
 	if dtlsTransport == nil || dtlsTransport.conn == nil {
 		return errSCTPTransportDTLS
 	}
-
 	sctpAssociation, err := sctp.Client(sctp.Config{
 		NetConn:              dtlsTransport.conn,
 		MaxReceiveBufferSize: r.api.settingEngine.sctp.maxReceiveBufferSize,
+		EnableZeroChecksum:   r.api.settingEngine.sctp.enableZeroChecksum,
 		LoggerFactory:        r.api.settingEngine.LoggerFactory,
+		RTOMax:               float64(r.api.settingEngine.sctp.rtoMax) / float64(time.Millisecond),
 	})
 	if err != nil {
 		return err
@@ -224,7 +230,7 @@ ACCEPT:
 			Ordered:           ordered,
 			MaxPacketLifeTime: maxPacketLifeTime,
 			MaxRetransmits:    maxRetransmits,
-		}, r.api.settingEngine.LoggerFactory.NewLogger("ortc"))
+		}, r, r.api.settingEngine.LoggerFactory.NewLogger("ortc"))
 		if err != nil {
 			r.log.Errorf("Failed to accept data channel: %v", err)
 			r.onError(err)
@@ -283,6 +289,13 @@ func (r *SCTPTransport) onDataChannel(dc *DataChannel) (done chan struct{}) {
 	r.lock.Lock()
 	r.dataChannels = append(r.dataChannels, dc)
 	r.dataChannelsAccepted++
+	if dc.ID() != nil {
+		r.dataChannelIDsUsed[*dc.ID()] = struct{}{}
+	} else {
+		// This cannot happen, the constructor for this datachannel in the caller
+		// takes a pointer to the id.
+		r.log.Errorf("accepted data channel with no ID")
+	}
 	handler := r.onDataChannelHandler
 	r.lock.Unlock()
 
@@ -359,9 +372,9 @@ func (r *SCTPTransport) State() SCTPTransportState {
 func (r *SCTPTransport) collectStats(collector *statsReportCollector) {
 	collector.Collecting()
 
-	stats := TransportStats{
+	stats := SCTPTransportStats{
 		Timestamp: statsTimestampFrom(time.Now()),
-		Type:      StatsTypeTransport,
+		Type:      StatsTypeSCTPTransport,
 		ID:        "sctpTransport",
 	}
 
@@ -369,6 +382,10 @@ func (r *SCTPTransport) collectStats(collector *statsReportCollector) {
 	if association != nil {
 		stats.BytesSent = association.BytesSent()
 		stats.BytesReceived = association.BytesReceived()
+		stats.SmoothedRoundTripTime = association.SRTT() * 0.001 // convert milliseconds to seconds
+		stats.CongestionWindow = association.CWND()
+		stats.ReceiverWindow = association.RWND()
+		stats.MTU = association.MTU()
 	}
 
 	collector.Collect(stats.ID, stats)
@@ -385,21 +402,12 @@ func (r *SCTPTransport) generateAndSetDataChannelID(dtlsRole DTLSRole, idOut **u
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	// Create map of ids so we can compare without double-looping each time.
-	idsMap := make(map[uint16]struct{}, len(r.dataChannels))
-	for _, dc := range r.dataChannels {
-		if dc.ID() == nil {
-			continue
-		}
-
-		idsMap[*dc.ID()] = struct{}{}
-	}
-
 	for ; id < max-1; id += 2 {
-		if _, ok := idsMap[id]; ok {
+		if _, ok := r.dataChannelIDsUsed[id]; ok {
 			continue
 		}
 		*idOut = &id
+		r.dataChannelIDsUsed[id] = struct{}{}
 		return nil
 	}
 

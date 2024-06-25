@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -7,11 +10,15 @@ import "testing"
 
 func TestGenerateDataChannelID(t *testing.T) {
 	sctpTransportWithChannels := func(ids []uint16) *SCTPTransport {
-		ret := &SCTPTransport{dataChannels: []*DataChannel{}}
+		ret := &SCTPTransport{
+			dataChannels:       []*DataChannel{},
+			dataChannelIDsUsed: make(map[uint16]struct{}),
+		}
 
 		for i := range ids {
 			id := ids[i]
 			ret.dataChannels = append(ret.dataChannels, &DataChannel{id: &id})
+			ret.dataChannelIDsUsed[id] = struct{}{}
 		}
 
 		return ret
@@ -42,6 +49,9 @@ func TestGenerateDataChannelID(t *testing.T) {
 		}
 		if *idPtr != testCase.result {
 			t.Errorf("Wrong id: %d expected %d", *idPtr, testCase.result)
+		}
+		if _, ok := testCase.s.dataChannelIDsUsed[*idPtr]; !ok {
+			t.Errorf("expected new id to be added to the map: %d", *idPtr)
 		}
 	}
 }

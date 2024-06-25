@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // Package util provides auxiliary functions internally used in webrtc package
 package util
 
@@ -15,12 +18,12 @@ const (
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
 
-// MathRandAlpha generates a mathmatical random alphabet sequence of the requested length.
+// MathRandAlpha generates a mathematical random alphabet sequence of the requested length.
 func MathRandAlpha(n int) string {
 	return globalMathRandomGenerator.GenerateString(n, runesAlpha)
 }
 
-// RandUint32 generates a mathmatical random uint32.
+// RandUint32 generates a mathematical random uint32.
 func RandUint32() uint32 {
 	return globalMathRandomGenerator.Uint32()
 }

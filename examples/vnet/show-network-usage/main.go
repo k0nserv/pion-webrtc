@@ -1,6 +1,10 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
+// show-network-usage shows the amount of packets flowing through the vnet
 package main
 
 import (
@@ -12,8 +16,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/vnet"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/transport/v3/vnet"
+	"github.com/pion/webrtc/v4"
 )
 
 /* VNet Configuration
@@ -83,25 +87,29 @@ func main() {
 	}()
 
 	// Create a network interface for offerer
-	offerVNet := vnet.NewNet(&vnet.NetConfig{
+	offerVNet, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"1.2.3.4"},
 	})
+	panicIfError(err)
+
 	// Add the network interface to the router
 	panicIfError(wan.AddNet(offerVNet))
 
 	offerSettingEngine := webrtc.SettingEngine{}
-	offerSettingEngine.SetVNet(offerVNet)
+	offerSettingEngine.SetNet(offerVNet)
 	offerAPI := webrtc.NewAPI(webrtc.WithSettingEngine(offerSettingEngine))
 
 	// Create a network interface for answerer
-	answerVNet := vnet.NewNet(&vnet.NetConfig{
+	answerVNet, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"1.2.3.5"},
 	})
+	panicIfError(err)
+
 	// Add the network interface to the router
 	panicIfError(wan.AddNet(answerVNet))
 
 	answerSettingEngine := webrtc.SettingEngine{}
-	answerSettingEngine.SetVNet(answerVNet)
+	answerSettingEngine.SetNet(answerVNet)
 	answerAPI := webrtc.NewAPI(webrtc.WithSettingEngine(answerSettingEngine))
 
 	// Start the virtual network by calling Start() on the root router
@@ -135,6 +143,12 @@ func main() {
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
 		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
+			os.Exit(0)
+		}
 	})
 
 	// Set the handler for Peer connection state
@@ -147,6 +161,12 @@ func main() {
 			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
 			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
 			fmt.Println("Peer Connection has gone to failed exiting")
+			os.Exit(0)
+		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
 			os.Exit(0)
 		}
 	})

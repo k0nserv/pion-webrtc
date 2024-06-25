@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -10,7 +13,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
-	"github.com/pion/transport/test"
+	"github.com/pion/transport/v3/test"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -30,7 +33,7 @@ func Test_TrackLocalStatic_NoCodecIntersection(t *testing.T) {
 		pc, err := NewPeerConnection(Configuration{})
 		assert.NoError(t, err)
 
-		noCodecPC, err := NewAPI().NewPeerConnection(Configuration{})
+		noCodecPC, err := NewAPI(WithMediaEngine(&MediaEngine{})).NewPeerConnection(Configuration{})
 		assert.NoError(t, err)
 
 		_, err = pc.AddTrack(track)
@@ -146,7 +149,7 @@ func Test_TrackLocalStatic_PayloadType(t *testing.T) {
 	assert.NoError(t, err)
 
 	onTrackFired, onTrackFiredFunc := context.WithCancel(context.Background())
-	offerer.OnTrack(func(track *TrackRemote, r *RTPReceiver) {
+	offerer.OnTrack(func(track *TrackRemote, _ *RTPReceiver) {
 		assert.Equal(t, track.PayloadType(), PayloadType(100))
 		assert.Equal(t, track.Codec().RTPCodecCapability.MimeType, "video/VP8")
 
@@ -248,4 +251,65 @@ func BenchmarkTrackLocalWrite(b *testing.B) {
 		_, err := track.Write(buf)
 		assert.NoError(b, err)
 	}
+}
+
+func Test_TrackLocalStatic_Padding(t *testing.T) {
+	mediaEngineOne := &MediaEngine{}
+	assert.NoError(t, mediaEngineOne.RegisterCodec(RTPCodecParameters{
+		RTPCodecCapability: RTPCodecCapability{MimeType: "video/VP8", ClockRate: 90000, Channels: 0, SDPFmtpLine: "", RTCPFeedback: nil},
+		PayloadType:        100,
+	}, RTPCodecTypeVideo))
+
+	mediaEngineTwo := &MediaEngine{}
+	assert.NoError(t, mediaEngineTwo.RegisterCodec(RTPCodecParameters{
+		RTPCodecCapability: RTPCodecCapability{MimeType: "video/VP8", ClockRate: 90000, Channels: 0, SDPFmtpLine: "", RTCPFeedback: nil},
+		PayloadType:        200,
+	}, RTPCodecTypeVideo))
+
+	offerer, err := NewAPI(WithMediaEngine(mediaEngineOne)).NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	answerer, err := NewAPI(WithMediaEngine(mediaEngineTwo)).NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	track, err := NewTrackLocalStaticSample(RTPCodecCapability{MimeType: MimeTypeVP8}, "video", "pion")
+	assert.NoError(t, err)
+
+	_, err = offerer.AddTransceiverFromKind(RTPCodecTypeVideo)
+	assert.NoError(t, err)
+
+	_, err = answerer.AddTrack(track)
+	assert.NoError(t, err)
+
+	onTrackFired, onTrackFiredFunc := context.WithCancel(context.Background())
+
+	offerer.OnTrack(func(track *TrackRemote, _ *RTPReceiver) {
+		assert.Equal(t, track.PayloadType(), PayloadType(100))
+		assert.Equal(t, track.Codec().RTPCodecCapability.MimeType, "video/VP8")
+
+		for i := 0; i < 20; i++ {
+			// Padding payload
+			p, _, e := track.ReadRTP()
+			assert.NoError(t, e)
+			assert.True(t, p.Padding)
+			assert.Equal(t, p.PaddingSize, byte(255))
+		}
+
+		onTrackFiredFunc()
+	})
+
+	assert.NoError(t, signalPair(offerer, answerer))
+
+	exit := false
+
+	for !exit {
+		select {
+		case <-time.After(1 * time.Millisecond):
+			assert.NoError(t, track.GeneratePadding(1))
+		case <-onTrackFired.Done():
+			exit = true
+		}
+	}
+
+	closePairNow(t, offerer, answerer)
 }

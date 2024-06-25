@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -19,12 +22,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/ice/v2"
+	"github.com/pion/ice/v3"
 	"github.com/pion/rtp"
-	"github.com/pion/transport/test"
-	"github.com/pion/transport/vnet"
-	"github.com/pion/webrtc/v3/internal/util"
-	"github.com/pion/webrtc/v3/pkg/rtcerr"
+	"github.com/pion/transport/v3/test"
+	"github.com/pion/transport/v3/vnet"
+	"github.com/pion/webrtc/v4/internal/util"
+	"github.com/pion/webrtc/v4/pkg/rtcerr"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -301,13 +304,13 @@ func TestPeerConnection_EventHandlers_Go(t *testing.T) {
 
 	// Verify that the noop case works
 	assert.NotPanics(t, func() { pc.onTrack(nil, nil) })
-	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ice.ConnectionStateNew) })
+	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ICEConnectionStateNew) })
 
-	pc.OnTrack(func(t *TrackRemote, r *RTPReceiver) {
+	pc.OnTrack(func(*TrackRemote, *RTPReceiver) {
 		close(onTrackCalled)
 	})
 
-	pc.OnICEConnectionStateChange(func(cs ICEConnectionState) {
+	pc.OnICEConnectionStateChange(func(ICEConnectionState) {
 		close(onICEConnectionStateChangeCalled)
 	})
 
@@ -326,7 +329,7 @@ func TestPeerConnection_EventHandlers_Go(t *testing.T) {
 
 	// Verify that the set handlers are called
 	assert.NotPanics(t, func() { pc.onTrack(&TrackRemote{}, &RTPReceiver{}) })
-	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ice.ConnectionStateNew) })
+	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ICEConnectionStateNew) })
 	assert.NotPanics(t, func() { go pc.onDataChannelHandler(&DataChannel{api: api}) })
 
 	<-onTrackCalled
@@ -598,15 +601,15 @@ func TestPeerConnection_IceLite(t *testing.T) {
 		closePairNow(t, offerPC, answerPC)
 	}
 
-	t.Run("Offerer", func(t *testing.T) {
+	t.Run("Offerer", func(*testing.T) {
 		connectTwoAgents(true, false)
 	})
 
-	t.Run("Answerer", func(t *testing.T) {
+	t.Run("Answerer", func(*testing.T) {
 		connectTwoAgents(false, true)
 	})
 
-	t.Run("Both", func(t *testing.T) {
+	t.Run("Both", func(*testing.T) {
 		connectTwoAgents(true, true)
 	})
 }
@@ -616,31 +619,22 @@ func TestOnICEGatheringStateChange(t *testing.T) {
 	seenComplete := &atomicBool{}
 
 	seenGatheringAndComplete := make(chan interface{})
-	seenClosed := make(chan interface{})
 
 	peerConn, err := NewPeerConnection(Configuration{})
 	assert.NoError(t, err)
 
-	var onStateChange func(s ICEGathererState)
-	onStateChange = func(s ICEGathererState) {
+	var onStateChange func(s ICEGatheringState)
+	onStateChange = func(s ICEGatheringState) {
 		// Access to ICEGatherer in the callback must not cause dead lock.
 		peerConn.OnICEGatheringStateChange(onStateChange)
-		if state := peerConn.iceGatherer.State(); state != s {
-			t.Errorf("State change callback argument (%s) and State() (%s) result differs",
-				s, state,
-			)
-		}
 
 		switch s { // nolint:exhaustive
-		case ICEGathererStateClosed:
-			close(seenClosed)
-			return
-		case ICEGathererStateGathering:
+		case ICEGatheringStateGathering:
 			if seenComplete.get() {
 				t.Error("Completed before gathering")
 			}
 			seenGathering.set(true)
-		case ICEGathererStateComplete:
+		case ICEGatheringStateComplete:
 			seenComplete.set(true)
 		}
 
@@ -657,18 +651,10 @@ func TestOnICEGatheringStateChange(t *testing.T) {
 	select {
 	case <-time.After(time.Second * 10):
 		t.Fatal("Gathering and Complete were never seen")
-	case <-seenClosed:
-		t.Fatal("Closed before PeerConnection Close")
 	case <-seenGatheringAndComplete:
 	}
 
 	assert.NoError(t, peerConn.Close())
-
-	select {
-	case <-time.After(time.Second * 10):
-		t.Fatal("Closed was never seen")
-	case <-seenClosed:
-	}
 }
 
 // Assert Trickle ICE behaviors
@@ -822,7 +808,7 @@ func TestMulticastDNSCandidates(t *testing.T) {
 	assert.NoError(t, signalPair(pcOffer, pcAnswer))
 
 	onDataChannel, onDataChannelCancel := context.WithCancel(context.Background())
-	pcAnswer.OnDataChannel(func(d *DataChannel) {
+	pcAnswer.OnDataChannel(func(*DataChannel) {
 		onDataChannelCancel()
 	})
 	<-onDataChannel.Done()
@@ -955,7 +941,7 @@ func TestICERestart_Error_Handling(t *testing.T) {
 	keepPackets.set(true)
 
 	// Add a filter that monitors the traffic on the router
-	wan.AddChunkFilter(func(c vnet.Chunk) bool {
+	wan.AddChunkFilter(func(vnet.Chunk) bool {
 		return keepPackets.get()
 	})
 
@@ -1247,7 +1233,7 @@ func TestPeerConnection_TransceiverDirection(t *testing.T) {
 			"offer sendonly answer sendrecv",
 			RTPTransceiverDirectionSendonly,
 			RTPTransceiverDirectionSendrecv,
-			[]RTPTransceiverDirection{RTPTransceiverDirectionSendrecv, RTPTransceiverDirectionRecvonly},
+			[]RTPTransceiverDirection{RTPTransceiverDirectionSendrecv},
 		},
 		{
 			"offer recvonly answer sendrecv",
@@ -1259,7 +1245,7 @@ func TestPeerConnection_TransceiverDirection(t *testing.T) {
 			"offer sendrecv answer sendonly",
 			RTPTransceiverDirectionSendrecv,
 			RTPTransceiverDirectionSendonly,
-			[]RTPTransceiverDirection{RTPTransceiverDirectionSendonly, RTPTransceiverDirectionRecvonly},
+			[]RTPTransceiverDirection{RTPTransceiverDirectionSendrecv},
 		},
 		{
 			"offer sendonly answer sendonly",
@@ -1375,21 +1361,21 @@ func TestPeerConnectionNilCallback(t *testing.T) {
 	assert.NoError(t, err)
 
 	pc.onSignalingStateChange(SignalingStateStable)
-	pc.OnSignalingStateChange(func(ss SignalingState) {
+	pc.OnSignalingStateChange(func(SignalingState) {
 		t.Error("OnSignalingStateChange called")
 	})
 	pc.OnSignalingStateChange(nil)
 	pc.onSignalingStateChange(SignalingStateStable)
 
 	pc.onConnectionStateChange(PeerConnectionStateNew)
-	pc.OnConnectionStateChange(func(pcs PeerConnectionState) {
+	pc.OnConnectionStateChange(func(PeerConnectionState) {
 		t.Error("OnConnectionStateChange called")
 	})
 	pc.OnConnectionStateChange(nil)
 	pc.onConnectionStateChange(PeerConnectionStateNew)
 
 	pc.onICEConnectionStateChange(ICEConnectionStateNew)
-	pc.OnICEConnectionStateChange(func(ics ICEConnectionState) {
+	pc.OnICEConnectionStateChange(func(ICEConnectionState) {
 		t.Error("OnConnectionStateChange called")
 	})
 	pc.OnICEConnectionStateChange(nil)
@@ -1583,4 +1569,40 @@ a=ssrc:1455629982 cname:{61fd3093-0326-4b12-8258-86bdc1fe677a}
 	assert.Equal(t, RTPTransceiverDirectionInactive, peerConnection.rtpTransceivers[0].direction.Load().(RTPTransceiverDirection)) //nolint:forcetypeassert
 
 	assert.NoError(t, peerConnection.Close())
+}
+
+func TestPeerConnectionState(t *testing.T) {
+	pc, err := NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+	assert.Equal(t, PeerConnectionStateNew, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateChecking, DTLSTransportStateNew)
+	assert.Equal(t, PeerConnectionStateConnecting, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateConnected, DTLSTransportStateNew)
+	assert.Equal(t, PeerConnectionStateConnecting, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateConnected, DTLSTransportStateConnecting)
+	assert.Equal(t, PeerConnectionStateConnecting, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateConnected, DTLSTransportStateConnected)
+	assert.Equal(t, PeerConnectionStateConnected, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateCompleted, DTLSTransportStateConnected)
+	assert.Equal(t, PeerConnectionStateConnected, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateConnected, DTLSTransportStateClosed)
+	assert.Equal(t, PeerConnectionStateConnected, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateDisconnected, DTLSTransportStateConnected)
+	assert.Equal(t, PeerConnectionStateDisconnected, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateFailed, DTLSTransportStateConnected)
+	assert.Equal(t, PeerConnectionStateFailed, pc.ConnectionState())
+
+	pc.updateConnectionState(ICEConnectionStateConnected, DTLSTransportStateFailed)
+	assert.Equal(t, PeerConnectionStateFailed, pc.ConnectionState())
+
+	assert.NoError(t, pc.Close())
+	assert.Equal(t, PeerConnectionStateClosed, pc.ConnectionState())
 }

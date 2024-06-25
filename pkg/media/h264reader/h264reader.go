@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // Package h264reader implements a H264 Annex-B Reader
 package h264reader
 
@@ -145,9 +148,8 @@ func (reader *H264Reader) NextNAL() (*NAL, error) {
 			if nal.UnitType == NalUnitTypeSEI {
 				reader.nalBuffer = nil
 				continue
-			} else {
-				break
 			}
+			break
 		}
 
 		reader.nalBuffer = append(reader.nalBuffer, readByte)

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
@@ -14,7 +17,7 @@ import (
 
 	"github.com/pion/datachannel"
 	"github.com/pion/logging"
-	"github.com/pion/webrtc/v3/pkg/rtcerr"
+	"github.com/pion/webrtc/v4/pkg/rtcerr"
 )
 
 const dataChannelBufferSize = math.MaxUint16 // message size limit for Chromium
@@ -49,6 +52,8 @@ type DataChannel struct {
 	onMessageHandler    func(DataChannelMessage)
 	openHandlerOnce     sync.Once
 	onOpenHandler       func()
+	dialHandlerOnce     sync.Once
+	onDialHandler       func()
 	onCloseHandler      func()
 	onBufferedAmountLow func()
 	onErrorHandler      func(error)
@@ -65,7 +70,7 @@ type DataChannel struct {
 // This constructor is part of the ORTC API. It is not
 // meant to be used together with the basic WebRTC API.
 func (api *API) NewDataChannel(transport *SCTPTransport, params *DataChannelParameters) (*DataChannel, error) {
-	d, err := api.newDataChannel(params, api.settingEngine.LoggerFactory.NewLogger("ortc"))
+	d, err := api.newDataChannel(params, nil, api.settingEngine.LoggerFactory.NewLogger("ortc"))
 	if err != nil {
 		return nil, err
 	}
@@ -80,13 +85,14 @@ func (api *API) NewDataChannel(transport *SCTPTransport, params *DataChannelPara
 
 // newDataChannel is an internal constructor for the data channel used to
 // create the DataChannel object before the networking is set up.
-func (api *API) newDataChannel(params *DataChannelParameters, log logging.LeveledLogger) (*DataChannel, error) {
+func (api *API) newDataChannel(params *DataChannelParameters, sctpTransport *SCTPTransport, log logging.LeveledLogger) (*DataChannel, error) {
 	// https://w3c.github.io/webrtc-pc/#peer-to-peer-data-api (Step #5)
 	if len(params.Label) > 65535 {
 		return nil, &rtcerr.TypeError{Err: ErrStringSizeLimit}
 	}
 
 	d := &DataChannel{
+		sctpTransport:     sctpTransport,
 		statsID:           fmt.Sprintf("DataChannel-%d", time.Now().UnixNano()),
 		label:             params.Label,
 		protocol:          params.Protocol,
@@ -175,6 +181,7 @@ func (d *DataChannel) open(sctpTransport *SCTPTransport) error {
 	dc.OnBufferedAmountLow(d.onBufferedAmountLow)
 	d.mu.Unlock()
 
+	d.onDial()
 	d.handleOpen(dc, false, d.negotiated)
 	return nil
 }
@@ -228,6 +235,30 @@ func (d *DataChannel) onOpen() {
 	}
 }
 
+// OnDial sets an event handler which is invoked when the
+// peer has been dialed, but before said peer has responded
+func (d *DataChannel) OnDial(f func()) {
+	d.mu.Lock()
+	d.dialHandlerOnce = sync.Once{}
+	d.onDialHandler = f
+	d.mu.Unlock()
+
+	if d.ReadyState() == DataChannelStateOpen {
+		// If the data channel is already open, call the handler immediately.
+		go d.dialHandlerOnce.Do(f)
+	}
+}
+
+func (d *DataChannel) onDial() {
+	d.mu.RLock()
+	handler := d.onDialHandler
+	d.mu.RUnlock()
+
+	if handler != nil {
+		go d.dialHandlerOnce.Do(handler)
+	}
+}
+
 // OnClose sets an event handler which is invoked when
 // the underlying data transport has been closed.
 func (d *DataChannel) OnClose(f func()) {
@@ -272,6 +303,8 @@ func (d *DataChannel) onMessage(msg DataChannelMessage) {
 func (d *DataChannel) handleOpen(dc *datachannel.DataChannel, isRemote, isAlreadyNegotiated bool) {
 	d.mu.Lock()
 	d.dataChannel = dc
+	bufferedAmountLowThreshold := d.bufferedAmountLowThreshold
+	onBufferedAmountLow := d.onBufferedAmountLow
 	d.mu.Unlock()
 	d.setReadyState(DataChannelStateOpen)
 
@@ -280,6 +313,9 @@ func (d *DataChannel) handleOpen(dc *datachannel.DataChannel, isRemote, isAlread
 	// * remote datachannels should fire OnOpened. This isn't spec compliant, but we can't break behavior yet
 	// * already negotiated datachannels should fire OnOpened
 	if d.api.settingEngine.detach.DataChannels || isRemote || isAlreadyNegotiated {
+		// bufferedAmountLowThreshold and onBufferedAmountLow might be set earlier
+		d.dataChannel.SetBufferedAmountLowThreshold(bufferedAmountLowThreshold)
+		d.dataChannel.OnBufferedAmountLow(onBufferedAmountLow)
 		d.onOpen()
 	} else {
 		dc.OnOpen(func() {
@@ -313,18 +349,11 @@ func (d *DataChannel) onError(err error) {
 	}
 }
 
-// See https://github.com/pion/webrtc/issues/1516
-// nolint:gochecknoglobals
-var rlBufPool = sync.Pool{New: func() interface{} {
-	return make([]byte, dataChannelBufferSize)
-}}
-
 func (d *DataChannel) readLoop() {
+	buffer := make([]byte, dataChannelBufferSize)
 	for {
-		buffer := rlBufPool.Get().([]byte) //nolint:forcetypeassert
 		n, isString, err := d.dataChannel.ReadDataChannel(buffer)
 		if err != nil {
-			rlBufPool.Put(buffer) // nolint:staticcheck
 			d.setReadyState(DataChannelStateClosed)
 			if !errors.Is(err, io.EOF) {
 				d.onError(err)
@@ -335,8 +364,6 @@ func (d *DataChannel) readLoop() {
 
 		m := DataChannelMessage{Data: make([]byte, n), IsString: isString}
 		copy(m.Data, buffer[:n])
-		// The 'staticcheck' pragma is a false positive on the part of the CI linter.
-		rlBufPool.Put(buffer) // nolint:staticcheck
 
 		// NB: Why was DataChannelMessage not passed as a pointer value?
 		d.onMessage(m) // nolint:staticcheck
@@ -384,7 +411,6 @@ func (d *DataChannel) ensureOpen() error {
 // resulting DataChannel object.
 func (d *DataChannel) Detach() (datachannel.ReadWriteCloser, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	if !d.api.settingEngine.detach.DataChannels {
 		return nil, errDetachNotEnabled
@@ -396,7 +422,28 @@ func (d *DataChannel) Detach() (datachannel.ReadWriteCloser, error) {
 
 	d.detachCalled = true
 
-	return d.dataChannel, nil
+	dataChannel := d.dataChannel
+	d.mu.Unlock()
+
+	// Remove the reference from SCTPTransport so that the datachannel
+	// can be garbage collected on close
+	d.sctpTransport.lock.Lock()
+	n := len(d.sctpTransport.dataChannels)
+	j := 0
+	for i := 0; i < n; i++ {
+		if d == d.sctpTransport.dataChannels[i] {
+			continue
+		}
+		d.sctpTransport.dataChannels[j] = d.sctpTransport.dataChannels[i]
+		j++
+	}
+	for i := j; i < n; i++ {
+		d.sctpTransport.dataChannels[i] = nil
+	}
+	d.sctpTransport.dataChannels = d.sctpTransport.dataChannels[:j]
+	d.sctpTransport.lock.Unlock()
+
+	return dataChannel, nil
 }
 
 // Close Closes the DataChannel. It may be called regardless of whether
@@ -544,7 +591,7 @@ func (d *DataChannel) SetBufferedAmountLowThreshold(th uint64) {
 }
 
 // OnBufferedAmountLow sets an event handler which is invoked when
-// the number of bytes of outgoing data becomes lower than the
+// the number of bytes of outgoing data becomes lower than or equal to the
 // BufferedAmountLowThreshold.
 func (d *DataChannel) OnBufferedAmountLow(f func()) {
 	d.mu.Lock()

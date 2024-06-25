@@ -1,16 +1,20 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
+// ice-single-port demonstrates Pion WebRTC's ability to serve many PeerConnections on a single port.
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/ice/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 var api *webrtc.API //nolint
@@ -75,24 +79,19 @@ func doSignaling(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Listen on UDP Port 8443, will be used for all WebRTC traffic
-	udpListener, err := net.ListenUDP("udp", &net.UDPAddr{
-		IP:   net.IP{0, 0, 0, 0},
-		Port: 8443,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Listening for WebRTC traffic at %s\n", udpListener.LocalAddr())
-
 	// Create a SettingEngine, this allows non-standard WebRTC behavior
 	settingEngine := webrtc.SettingEngine{}
 
 	// Configure our SettingEngine to use our UDPMux. By default a PeerConnection has
 	// no global state. The API+SettingEngine allows the user to share state between them.
 	// In this case we are sharing our listening port across many.
-	settingEngine.SetICEUDPMux(webrtc.NewICEUDPMux(nil, udpListener))
+	// Listen on UDP Port 8443, will be used for all WebRTC traffic
+	mux, err := ice.NewMultiUDPMuxFromPort(8443)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Listening for WebRTC traffic at %d\n", 8443)
+	settingEngine.SetICEUDPMux(mux)
 
 	// Create a new API using our SettingEngine
 	api = webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
@@ -101,5 +100,6 @@ func main() {
 	http.HandleFunc("/doSignaling", doSignaling)
 
 	fmt.Println("Open http://localhost:8080 to access this demo")
+	// nolint: gosec
 	panic(http.ListenAndServe(":8080", nil))
 }

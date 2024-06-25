@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
+// data-channels-flow-control demonstrates how to use the DataChannel congestion control APIs
 package main
 
 import (
@@ -8,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 const (
@@ -52,7 +56,7 @@ func createOfferer() *webrtc.PeerConnection {
 		MaxRetransmits: &maxRetransmits,
 	}
 
-	sendMoreCh := make(chan struct{})
+	sendMoreCh := make(chan struct{}, 1)
 
 	// Create a datachannel with label 'data'
 	dc, err := pc.CreateDataChannel("data", options)
@@ -66,7 +70,7 @@ func createOfferer() *webrtc.PeerConnection {
 			err2 := dc.Send(buf)
 			check(err2)
 
-			if dc.BufferedAmount()+uint64(len(buf)) > maxBufferedAmount {
+			if dc.BufferedAmount() > maxBufferedAmount {
 				// Wait until the bufferedAmount becomes lower than the threshold
 				<-sendMoreCh
 			}
@@ -79,7 +83,12 @@ func createOfferer() *webrtc.PeerConnection {
 
 	// This callback is made when the current bufferedAmount becomes lower than the threshold
 	dc.OnBufferedAmountLow(func() {
-		sendMoreCh <- struct{}{}
+		// Make sure to not block this channel or perform long running operations in this callback
+		// This callback is executed by pion/sctp. If this callback is blocking it will stop operations
+		select {
+		case sendMoreCh <- struct{}{}:
+		default:
+		}
 	})
 
 	return pc
@@ -163,6 +172,12 @@ func main() {
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
 		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
+			os.Exit(0)
+		}
 	})
 
 	// Set the handler for Peer connection state
@@ -175,6 +190,12 @@ func main() {
 			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
 			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
 			fmt.Println("Peer Connection has gone to failed exiting")
+			os.Exit(0)
+		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
 			os.Exit(0)
 		}
 	})

@@ -1,21 +1,28 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 //go:build !js
 // +build !js
 
+// play-from-disk demonstrates how to send video and/or audio to your browser from files saved to disk.
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/examples/internal/signal"
-	"github.com/pion/webrtc/v3/pkg/media"
-	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
-	"github.com/pion/webrtc/v3/pkg/media/oggreader"
+	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v4/pkg/media/ivfreader"
+	"github.com/pion/webrtc/v4/pkg/media/oggreader"
 )
 
 const (
@@ -24,6 +31,7 @@ const (
 	oggPageDuration = time.Millisecond * 20
 )
 
+// nolint:gocognit
 func main() {
 	// Assert that we have an audio or video file
 	_, err := os.Stat(videoFileName)
@@ -56,8 +64,31 @@ func main() {
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
 
 	if haveVideoFile {
+		file, openErr := os.Open(videoFileName)
+		if openErr != nil {
+			panic(openErr)
+		}
+
+		_, header, openErr := ivfreader.NewWith(file)
+		if openErr != nil {
+			panic(openErr)
+		}
+
+		// Determine video codec
+		var trackCodec string
+		switch header.FourCC {
+		case "AV01":
+			trackCodec = webrtc.MimeTypeAV1
+		case "VP90":
+			trackCodec = webrtc.MimeTypeVP9
+		case "VP80":
+			trackCodec = webrtc.MimeTypeVP8
+		default:
+			panic(fmt.Sprintf("Unable to handle FourCC %s", header.FourCC))
+		}
+
 		// Create a video track
-		videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "pion")
+		videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: trackCodec}, "video", "pion")
 		if videoTrackErr != nil {
 			panic(videoTrackErr)
 		}
@@ -210,11 +241,17 @@ func main() {
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
 		}
+
+		if s == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
+			os.Exit(0)
+		}
 	})
 
 	// Wait for the offer to be pasted
 	offer := webrtc.SessionDescription{}
-	signal.Decode(signal.MustReadStdin(), &offer)
+	decode(readUntilNewline(), &offer)
 
 	// Set the remote SessionDescription
 	if err = peerConnection.SetRemoteDescription(offer); err != nil {
@@ -241,8 +278,50 @@ func main() {
 	<-gatherComplete
 
 	// Output the answer in base64 so we can paste it in browser
-	fmt.Println(signal.Encode(*peerConnection.LocalDescription()))
+	fmt.Println(encode(peerConnection.LocalDescription()))
 
 	// Block forever
 	select {}
+}
+
+// Read from stdin until we get a newline
+func readUntilNewline() (in string) {
+	var err error
+
+	r := bufio.NewReader(os.Stdin)
+	for {
+		in, err = r.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			panic(err)
+		}
+
+		if in = strings.TrimSpace(in); len(in) > 0 {
+			break
+		}
+	}
+
+	fmt.Println("")
+	return
+}
+
+// JSON encode + base64 a SessionDescription
+func encode(obj *webrtc.SessionDescription) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
+	}
+
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// Decode a base64 and unmarshal JSON into a SessionDescription
+func decode(in string, obj *webrtc.SessionDescription) {
+	b, err := base64.StdEncoding.DecodeString(in)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = json.Unmarshal(b, obj); err != nil {
+		panic(err)
+	}
 }
